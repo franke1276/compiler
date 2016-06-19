@@ -1,3 +1,9 @@
+import java.io.IOException
+
+import org.apache.bcel.Constants
+import org.apache.bcel.Constants.{PUSH => _, _}
+import org.apache.bcel.generic.{ILOAD, ISTORE, InstructionConstants, _}
+
 import scala.util.parsing.combinator._
 
 case class Program(stmt: List[Stmt])
@@ -59,4 +65,105 @@ class SimpleParser extends JavaTokenParsers {
 
 object Main extends SimpleParser {
   def parseExtern(s: String) = parse(program, s)
+
+
+  def main(args: Array[String]) {
+    gen(Program(List(
+      AssignmentStmt(
+        Symbol("x"),
+          Mul(
+            Constant(9),
+            Add(Constant(2), Constant(3))
+          )),
+      ExpressionStmt(
+        Add(
+          SymbolValue(Symbol("x")),
+          Constant(9)))
+    )))
+    println(s"generated")
+  }
+
+
+  def gen(p: Program) = {
+    val cg: ClassGen = new ClassGen("Program", "java.lang.Object", "<generated>", ACC_PUBLIC | ACC_SUPER, null)
+    val cp: ConstantPoolGen = cg.getConstantPool
+    val il: InstructionList = new InstructionList
+
+    val mg: MethodGen = new MethodGen(ACC_STATIC | ACC_PUBLIC, Type.VOID, Array[Type](new ArrayType(Type.STRING, 1)), Array[String]("argv"), "main", "HelloWorld", il, cp)
+    val factory: InstructionFactory = new InstructionFactory(cg)
+
+    var vars = Map[String, Int]()
+
+    def genArithmeticExpression(c: ArithmeticExpression): Unit = {
+      c match {
+        case Constant(value) =>
+          il.append(new PUSH(cp, value.toInt))
+        case SymbolValue(Symbol(value)) =>
+          il.append(new ILOAD(vars(value)))
+        case Add(x,y) =>
+          genArithmeticExpression(x)
+          genArithmeticExpression(y)
+          il.append(new IADD())
+        case Sub(x,y) =>
+          genArithmeticExpression(x)
+          genArithmeticExpression(y)
+          il.append(new ISUB())
+        case Mul(x,y) =>
+          genArithmeticExpression(x)
+          genArithmeticExpression(y)
+          il.append(new IMUL())
+        case Div(x,y) =>
+          genArithmeticExpression(x)
+          genArithmeticExpression(y)
+          il.append(new IDIV())
+
+      }
+    }
+
+    def genExpression(e: ExpressionStmt) = {
+      println(s"${e.expression}")
+      genArithmeticExpression(e.expression)
+    }
+    def genAssignment(a: AssignmentStmt) = {
+      println(s"${a.symbol.name}=${a.expression}")
+      val lg: LocalVariableGen = mg.addLocalVariable(a.symbol.name, Type.INT, null, null)
+      val x: Int = lg.getIndex
+      genArithmeticExpression(a.expression)
+      lg.setStart(il.append(new ISTORE(x)))
+      vars = vars + (a.symbol.name -> x)
+    }
+
+
+
+    val p_stream: ObjectType = new ObjectType("java.io.PrintStream")
+
+
+    il.append(factory.createFieldAccess("java.lang.System", "out", p_stream, Constants.GETSTATIC))
+
+    p.stmt.foreach{
+      case e: ExpressionStmt => genExpression(e)
+      case a: AssignmentStmt => genAssignment(a)
+    }
+
+    println(vars)
+
+    il.append(factory.createInvoke("java.io.PrintStream", "println", Type.VOID, Array[Type](Type.INT), Constants.INVOKEVIRTUAL))
+
+    il.append(InstructionConstants.RETURN)
+
+
+    mg.setMaxStack
+    cg.addMethod(mg.getMethod)
+    il.dispose
+    cg.addEmptyConstructor(ACC_PUBLIC)
+
+    try {
+      cg.getJavaClass.dump("Program.class")
+    }
+    catch {
+      case e: IOException => {
+        System.err.println(e)
+      }
+    }
+  }
 }
