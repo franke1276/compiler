@@ -1,6 +1,6 @@
 import scala.util.parsing.combinator._
 
-case class Program(stmt: Stmt)
+case class Program(stmt: List[Stmt])
 
 trait ArithmeticExpression
 
@@ -46,11 +46,13 @@ class SimpleParser extends JavaTokenParsers {
       case (x, "/" ~ y) => Div(x, y)
     }
   }
-  def assignmentStmt = ("let" ~ symbol ~ "=" ~ expr) ^^ {
+  def assignmentStmt: Parser[Stmt] = ("let" ~ symbol ~ "=" ~ expr) ^^ {
     case "let" ~ sy ~ "=" ~ e => AssignmentStmt(sy, e)
   }
   def exprStmt: Parser[Stmt] = expr ^^ { x => ExpressionStmt(x) }
-  def program: Parser[Program] = (assignmentStmt  | exprStmt ) ^^ Program.apply
+  def stmt: Parser[Stmt] = assignmentStmt  | exprStmt
+  def program: Parser[Program] = (stmt ~ rep(stmt)) ^^ {case s ~ list=> Program(s :: list)}
+
 
 }
 
