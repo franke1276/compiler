@@ -9,23 +9,49 @@ import scala.util.parsing.combinator._
 
 case class Program(fd: List[Declaration])
 
-trait Expression
+trait Tpe
+case object NotInferedTpe extends Tpe
+case object IntTpe extends Tpe
+case object StringTpe extends Tpe
 
-case class Constant(value: Long) extends Expression
+trait Expression {
+  def tpe: Tpe
+}
 
-case class FunctionCall(name: String, parameter: List[Expression]) extends Expression
+case class Constant(value: Long) extends Expression{
+  def tpe: Tpe = IntTpe
+}
+case class StringConstant(value: String) extends Expression{
+  def tpe: Tpe = StringTpe
+}
 
-case class Symbol(name: String)
 
-case class SymbolValue(symbol: Symbol)  extends Expression
+case class FunctionCall(name: String, parameter: List[Expression]) extends Expression{
+  def tpe: Tpe = IntTpe
+}
 
-case class Mul(a: Expression, b: Expression) extends Expression
+case class Symbol(name: String, tpe: Tpe)
 
-case class Div(a: Expression, b: Expression) extends Expression
+case class SymbolValue(symbol: Symbol)  extends Expression {
+  def tpe: Tpe = symbol.tpe
 
-case class Add(a: Expression, b: Expression) extends Expression
+}
 
-case class Sub(a: Expression, b: Expression) extends Expression
+case class Mul(a: Expression, b: Expression) extends Expression{
+  def tpe: Tpe = IntTpe
+}
+
+case class Div(a: Expression, b: Expression) extends Expression{
+  def tpe: Tpe = IntTpe
+}
+
+case class Add(a: Expression, b: Expression) extends Expression{
+  def tpe: Tpe = IntTpe
+}
+
+case class Sub(a: Expression, b: Expression) extends Expression{
+  def tpe: Tpe = IntTpe
+}
 
 trait Stmt
 trait Declaration
@@ -35,11 +61,11 @@ case class ExpressionStmt(expression: Expression) extends Stmt
 case class FunctionDeclaration(name: String, params: List[String], stmts: List[Stmt]) extends Declaration
 
 class SimpleParser extends JavaTokenParsers {
-  def symbol:Parser[Symbol] = "[a-zA-Z_]+".r ^^ Symbol.apply
+  def symbol:Parser[Symbol] = "[a-zA-Z_]+".r ^^ {s => Symbol(s, NotInferedTpe)}
   def functionCall: Parser[FunctionCall]=  functionName ~ "(" ~ repsep(expr, ",") ~ ")" ^^ {
     case fn ~ "(" ~ exp ~ ")" => FunctionCall(fn, exp)
   }
-  def constant: Parser[Expression] = floatingPointNumber ^^ {
+  def constant: Parser[Expression] = stringLiteral ^^ {s => StringConstant(s.take(s.length - 1).drop(1))} | floatingPointNumber ^^ {
     s => Constant(s.toLong)
   } | functionCall | symbol ^^ SymbolValue.apply
 
@@ -59,8 +85,14 @@ class SimpleParser extends JavaTokenParsers {
       case (x, "/" ~ y) => Div(x, y)
     }
   }
-  def assignmentStmt: Parser[Stmt] = ("let" ~ symbol ~ "=" ~ expr) ^^ {
-    case "let" ~ sy ~ "=" ~ e => AssignmentStmt(sy, e)
+  def tpe: Parser[Tpe] = "[A-Z][a-z0-9]*".r ^^ {
+    case "Int" => IntTpe
+    case "String" => StringTpe
+  }
+
+  def assignmentStmt: Parser[Stmt] = ("let" ~ symbol ~ opt(":" ~ tpe) ~  "=" ~ expr) ^^ {
+    case "let" ~ sy ~ None ~ "=" ~ e => AssignmentStmt(sy.copy(tpe=e.tpe), e)
+    case "let" ~ sy ~ Some(":" ~ t) ~ "=" ~ e if t == e.tpe => AssignmentStmt(sy.copy(tpe=t), e)
   }
   def exprStmt: Parser[Stmt] = expr ^^ { x => ExpressionStmt(x) }
   def functionName: Parser[String] = "[a-zA-Y_]+".r
@@ -88,10 +120,11 @@ object Main extends SimpleParser {
   def main(args: Array[String]) {
     parseExtern(
       """fn add(a,b){
-        | a + b
+        | let x = a + 7
+        | x + b / 3
         | }
         |fn main(){
-        | print(add(4,7))
+        | print(add(4 * (5 + 7),7))
         |}
       """.stripMargin) match {
       case Success(program, _) =>
@@ -130,7 +163,7 @@ object Main extends SimpleParser {
         case FunctionCall(name, params) =>
           params.foreach(handleExpression(vars, mg, il))
           il.append(factory.createInvoke("Program", name, Type.INT, params.map(_ => Type.INT).toArray , Constants.INVOKESTATIC))
-        case SymbolValue(Symbol(value)) =>
+        case SymbolValue(Symbol(value, tpe)) =>
           il.append(new ILOAD(vars(value)))
         case Add(x, y) =>
           Seq(x,y).foreach(handleExpression(vars, mg, il))
