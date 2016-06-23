@@ -6,12 +6,12 @@ class ExampleSpec extends FlatSpec with Matchers {
   it should "parse literal" in {
 //    Main.parseExtern("fn main(){ 1 }").get should be(Program(List(FunctionDeclaration("main", Nil, List(ExpressionStmt(Constant(1)))))))
     Main.parseExtern(
-      """fn main() {
-        |let x="hallo"
+      """fn main(): Void {
+        |let x=5
         |x }""".stripMargin).get should be(Program(List(
-      FunctionDeclaration("main", Nil, List(
-        AssignmentStmt(Symbol("x", StringTpe), StringConstant("hallo")),
-        ExpressionStmt(SymbolValue(Symbol("x", StringTpe)))
+      FunctionDeclaration("main", Nil, VoidTpe, List(
+        AssignmentStmt(Symbol("x"), None, Constant(5)),
+        ExpressionStmt(Symbol("x"))
         )))))
 //    Main.parseExtern("fn main(): 3 * 8").get should be(Program(List(FunctionDeclaration("main", Nil, List(ExpressionStmt(Mul(Constant(3), Constant(8))))))))
 //    Main.parseExtern("fn main(): 3 * 8 * 5").get should be(Program(List(FunctionDeclaration("main", Nil, List(ExpressionStmt(Mul(Mul(Constant(3), Constant(8)), Constant(5))))))))
