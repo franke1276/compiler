@@ -74,5 +74,8 @@ public class Gen {
         } catch (IOException e) {
             System.err.println(e);
         }
+
+        il.append(factory.createNew(Type.STRINGBUFFER));
+        il.append(InstructionConstants.DUP);
     }
 }

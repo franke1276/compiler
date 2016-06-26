@@ -142,13 +142,14 @@ object Main extends SimpleParser {
   def main(args: Array[String]) {
     parseExtern(
       """fn hello(s: String): String {
-        |s + "halle"
+        | s + "hallo"
         |}
         |fn add(a: Int,b: Int): Int{
         | let x: Int = a + 7
         | x + b / 3
         | }
         |fn main(): Void{
+        | print(hello("world"))
         | print(add(4 * (5 + 7),7))
         |}
       """.stripMargin) match {
@@ -267,13 +268,24 @@ object Main extends SimpleParser {
           il.append(new PUSH(cp, value.toInt))
         case StringConstant(value) =>
           il.append(new PUSH(cp, value))
-        case Symbol(value, _) =>
+        case Symbol(value, Some(StringTpe)) =>
+          il.append(new ALOAD(vars(value)))
+        case Symbol(value, Some(IntTpe)) =>
           il.append(new ILOAD(vars(value)))
         case FunctionCall("print", List((Some(t), p)), Some(rt)) =>
           val p_stream: ObjectType = new ObjectType("java.io.PrintStream")
           il.append(factory.createFieldAccess("java.lang.System", "out", p_stream, Constants.GETSTATIC))
           handleExpression(vars, mg, il)(p)
           il.append(factory.createInvoke("java.io.PrintStream", "println", javaType(rt), Array[Type](javaType(t)), Constants.INVOKEVIRTUAL))
+        case FunctionCall("+", l @ List((tx,x),(ty,y)), Some(StringTpe)) =>
+          il.append(factory.createNew(Type.STRINGBUFFER))
+          il.append(InstructionConstants.DUP)
+          handleExpression(vars, mg, il)(x)
+          il.append(factory.createInvoke("java.lang.StringBuffer", "<init>", Type.VOID, Array[Type](Type.STRING), Constants.INVOKESPECIAL))
+          handleExpression(vars, mg, il)(y)
+          il.append(factory.createInvoke("java.lang.StringBuffer", "append", Type.STRINGBUFFER, Array[Type](Type.STRING), Constants.INVOKEVIRTUAL))
+          il.append(factory.createInvoke("java.lang.StringBuffer", "toString", Type.STRING, Type.NO_ARGS, Constants.INVOKEVIRTUAL))
+
         case FunctionCall("+", l @ List((tx,x),(ty,y)), t) =>
           l.map(_._2).foreach(handleExpression(vars, mg, il))
           il.append(new IADD())
@@ -286,7 +298,7 @@ object Main extends SimpleParser {
         case FunctionCall("/", l @ List((tx,x),(ty,y)), t) =>
           l.map(_._2).foreach(handleExpression(vars, mg, il))
           il.append(new IDIV())
-        case FunctionCall(name, params, Some(t)) =>
+        case a @ FunctionCall(name, params, Some(t)) =>
           params.map(_._2).foreach(handleExpression(vars, mg, il))
           il.append(factory.createInvoke("Program", name, javaType(t), params.map(t => javaType(t._1.get)).toArray, Constants.INVOKESTATIC))
       }
@@ -309,10 +321,14 @@ object Main extends SimpleParser {
             body.foreach(handleStmt(vars, mg, il))
             il.append(InstructionConstants.RETURN)
           }
-        case FunctionDeclaration(fn, params, returnType, body) =>
+        case a @ FunctionDeclaration(fn, params, returnType, body) =>
           declareMethode(javaType(returnType), params.map(_._1), params.map( t => javaType(t._2)), fn) { (il, mg, vars) =>
             body.foreach(handleStmt(vars, mg, il))
-            il.append(InstructionConstants.IRETURN)
+            val rt = returnType match {
+            case StringTpe => InstructionConstants.ARETURN
+            case _ => InstructionConstants.IRETURN
+          }
+            il.append(rt)
           }
       }
     }
