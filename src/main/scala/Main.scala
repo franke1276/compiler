@@ -6,6 +6,9 @@ import org.apache.bcel.generic.{ILOAD, ISTORE, InstructionConstants, _}
 
 import scala.collection.mutable
 import scala.util.parsing.combinator._
+import scalaz._
+import Scalaz._
+import scala.collection.generic.SeqFactory
 
 case class Program(fd: List[Declaration])
 
@@ -34,7 +37,7 @@ case class StringConstant(value: String) extends Expression {
 }
 
 
-case class FunctionCall(name: String, parameter: List[Expression], tpe: Option[Tpe] = None) extends Expression {
+case class FunctionCall(name: String, parameter: List[(Option[Tpe], Expression)], tpe: Option[Tpe] = None) extends Expression {
 }
 
 
@@ -57,37 +60,37 @@ trait Stmt
 
 trait Declaration
 
-case class AssignmentStmt(symbol: Symbol, tpe: Option[Tpe], expression: Expression) extends Stmt
+case class AssignmentStmt(symbol: String, tpe: Tpe, expression: Expression) extends Stmt
 
 case class ExpressionStmt(expression: Expression) extends Stmt
 
 case class FunctionDeclaration(name: String, params: List[(String, Tpe)], returnType: Tpe, stmts: List[Stmt]) extends Declaration
 
 class SimpleParser extends JavaTokenParsers {
-  def symbol: Parser[Symbol] = "[a-zA-Z_]+".r ^^ { s => Symbol(s) }
+  def symbol: Parser[String] = "[a-zA-Z_]+".r
 
   def functionCall: Parser[FunctionCall] = functionName ~ "(" ~ repsep(expr, ",") ~ ")" ^^ {
-    case fn ~ "(" ~ exp ~ ")" => FunctionCall(fn, exp)
+    case fn ~ "(" ~ exp ~ ")" => FunctionCall(fn, exp.map(r => (None, r)))
   }
 
   def constant: Parser[Expression] = stringLiteral ^^ { s => StringConstant(s.take(s.length - 1).drop(1)) } | floatingPointNumber ^^ {
     s => Constant(s.toLong)
-  } | functionCall | symbol
+  } | functionCall | symbol ^^ { s => Symbol(s)}
 
   def factor: Parser[Expression] = constant | "(" ~> expr <~ ")"
 
   def expr: Parser[Expression] = (term ~ rep("+" ~ term | "-" ~ term)) ^^ {
     case t1 ~ list => list.foldLeft(t1) {
-      case (x, "+" ~ y) => FunctionCall("+", List(x, y))
-      case (x, "-" ~ y) => FunctionCall("-", List(x, y))
+      case (x, "+" ~ y) => FunctionCall("+", List((None,x), (None,y)))
+      case (x, "-" ~ y) => FunctionCall("-", List((None,x), (None,y)))
     }
   }
 
 
   def term: Parser[Expression] = (factor ~ rep("*" ~ factor | "/" ~ factor)) ^^ {
     case f1 ~ list => list.foldLeft(f1) {
-      case (x, "*" ~ y) => FunctionCall("*", List(x, y))
-      case (x, "/" ~ y) => FunctionCall("/", List(x, y))
+      case (x, "*" ~ y) => FunctionCall("*", List((None,x), (None,y)))
+      case (x, "/" ~ y) => FunctionCall("/", List((None,x), (None,y)))
     }
   }
 
@@ -96,9 +99,8 @@ class SimpleParser extends JavaTokenParsers {
     case "String" => StringTpe
   }
 
-  def assignmentStmt: Parser[Stmt] = ("let" ~ symbol ~ opt(":" ~ tpe) ~ "=" ~ expr) ^^ {
-    case "let" ~ sy ~ None ~ "=" ~ e => AssignmentStmt(sy, None, e)
-    case "let" ~ sy ~ Some(":" ~ t) ~ "=" ~ e => AssignmentStmt(sy, Some(t), e)
+  def assignmentStmt: Parser[Stmt] = ("let" ~ symbol ~ ":" ~ tpe ~ "=" ~ expr) ^^ {
+    case "let" ~ sy ~ ":" ~ t ~ "=" ~ e => AssignmentStmt(sy, t, e)
   }
 
   def exprStmt: Parser[Stmt] = expr ^^ { x => ExpressionStmt(x) }
@@ -151,11 +153,12 @@ object Main extends SimpleParser {
         |}
       """.stripMargin) match {
       case Success(program, _) =>
-        println(program)
-
-        checkTypes(program)
-
-        gen(program)
+        checkTypes(program) match {
+          case \/-(p) =>
+            println(p)
+            gen(p)
+          case -\/(errorMsg) => println(errorMsg)
+        }
       case e => println(e)
     }
     println(s"generated")
@@ -171,7 +174,7 @@ object Main extends SimpleParser {
     (("print", List[Tpe](IntTpe)), VoidTpe)
   )
 
-  def checkTypes(p: Program) = {
+  def checkTypes(p: Program): String \/ Program = {
     var functions = mutable.Map[(String, List[Tpe]), Tpe](buildInFunctions: _*)
 
     def typeOf(symbols: mutable.Map[String, Tpe])(e: Expression): Tpe = {
@@ -179,42 +182,68 @@ object Main extends SimpleParser {
       e match {
         case _: Constant => IntTpe
         case _: StringConstant => StringTpe
-        case FunctionCall(n, args, _) if functions.get((n, args.map(tf))).isDefined =>
-          functions((n, args.map(tf)))
+        case FunctionCall(n, args, _) if functions.get((n, args.map(a => tf(a._2)))).isDefined =>
+          functions((n, args.map(a => tf(a._2))))
         case Symbol(n, _) =>
           symbols(n)
         case t => throw new IllegalStateException(s"wrong type: $t symbols: $symbols")
       }
     }
+    def handleExpression(expression: Expression, getType: Expression => Tpe): String \/ Expression = {
+     expression match {
+       case e @ Constant(_) => \/-(e)
+       case e @ StringConstant(_) => \/-(e)
+       case e @ Symbol(_, _) =>
+         val r  = \/-(e.copy(tpe = Some(getType(e))))
+         println(s"handleExpression $r")
+         r
+       case e @ FunctionCall(fn, params, _) =>
+         val newParams = params.map(p => handleExpression(p._2, getType).map(e => (Option(getType(p._2)), e))).sequenceU
+         newParams.map(p => e.copy(tpe = Some(getType(e)), parameter = p))
+     }
+    }
 
-    def handleDeclaration(e: Declaration): Unit = {
+    def handleDeclaration(e: Declaration): String \/ Declaration = {
       e match {
-        case e@FunctionDeclaration(fn, params, returnType, body) =>
+        case e@FunctionDeclaration(fn, params, returnType, bodyExp) =>
           functions += ((fn, params.map(_._2)) -> returnType)
           var symbols = mutable.Map[String, Tpe](params: _*)
           val tf = typeOf(symbols) _
-          def handleStmt(s: Stmt): Unit = s match {
-            case AssignmentStmt(symbol, Some(t), exp) =>
-              symbols += (symbol.name -> t)
+          def handleStmt(s: Stmt): String \/ Stmt = s match {
+            case a @ AssignmentStmt(symbol, t, exp) =>
+              symbols += (symbol -> t)
               val expType = tf(exp)
               if (t != expType) {
-                throw new IllegalStateException(s"wrong type: $symbol has type $t but expression has type $expType")
+                -\/(s"wrong type: $symbol has type $t but expression has type $expType")
+              } else {
+                val r = handleExpression(exp, tf).map( e => AssignmentStmt(symbol, t, e))
+                println(r)
+                r
               }
-            case AssignmentStmt(symbol, None, exp) =>
-              symbols += (symbol.name -> tf(exp))
             case ExpressionStmt(exp) =>
+              handleExpression(exp, tf).map( r => ExpressionStmt(r))
           }
-          body.foreach(handleStmt)
-          body.last match {
-            case ExpressionStmt(exp) if tf(exp) == returnType =>
-            case ExpressionStmt(exp) => throw new IllegalStateException(s"type of last expression (${tf(exp)} is incompatible with return type of the function : $returnType)")
+          def checkLastExpressionAgainsReturnType(e: Stmt, rt: Tpe): Boolean = {
+            e match {
+              case ExpressionStmt(exp) if tf(exp) == returnType =>  true
+              case ExpressionStmt(exp) => false
+            }
           }
+
+          val typedBody = bodyExp.map(handleStmt).sequenceU.flatMap(exps =>
+            if (checkLastExpressionAgainsReturnType(exps.last, returnType)) {
+              \/-(exps)
+            } else {
+              -\/(s"wrong type: expected: $returnType")
+            }
+          )
           println(s"symbols for $fn: $symbols")
+          typedBody.map(b => e.copy(stmts = b))
       }
     }
 
-    p.fd.foreach(handleDeclaration)
     println(s"functions: $functions")
+    p.fd.map(handleDeclaration).sequenceU.map(f => p.copy(fd = f))
   }
 
   def gen(p: Program) = {
@@ -238,39 +267,38 @@ object Main extends SimpleParser {
           il.append(new PUSH(cp, value.toInt))
         case StringConstant(value) =>
           il.append(new PUSH(cp, value))
-        case FunctionCall("print", List(p), t) =>
+        case Symbol(value, _) =>
+          il.append(new ILOAD(vars(value)))
+        case FunctionCall("print", List((Some(t), p)), Some(rt)) =>
           val p_stream: ObjectType = new ObjectType("java.io.PrintStream")
           il.append(factory.createFieldAccess("java.lang.System", "out", p_stream, Constants.GETSTATIC))
           handleExpression(vars, mg, il)(p)
-          il.append(factory.createInvoke("java.io.PrintStream", "println", Type.VOID, Array[Type](Type.INT), Constants.INVOKEVIRTUAL))
-        case Symbol(value, _) =>
-          il.append(new ILOAD(vars(value)))
-        case FunctionCall("+", l @ List(x,y), t) =>
-          l.foreach(handleExpression(vars, mg, il))
+          il.append(factory.createInvoke("java.io.PrintStream", "println", javaType(rt), Array[Type](javaType(t)), Constants.INVOKEVIRTUAL))
+        case FunctionCall("+", l @ List((tx,x),(ty,y)), t) =>
+          l.map(_._2).foreach(handleExpression(vars, mg, il))
           il.append(new IADD())
-        case FunctionCall("-", l @ List(x,y), t) =>
-          l.foreach(handleExpression(vars, mg, il))
+        case FunctionCall("-", l @ List((tx,x),(ty,y)), t) =>
+          l.map(_._2).foreach(handleExpression(vars, mg, il))
           il.append(new ISUB())
-        case FunctionCall("*", l @ List(x,y), t) =>
-          l.foreach(handleExpression(vars, mg, il))
+        case FunctionCall("*", l @ List((tx,x),(ty,y)), t) =>
+          l.map(_._2).foreach(handleExpression(vars, mg, il))
           il.append(new IMUL())
-        case FunctionCall("/", l @ List(x,y), t) =>
-          l.foreach(handleExpression(vars, mg, il))
+        case FunctionCall("/", l @ List((tx,x),(ty,y)), t) =>
+          l.map(_._2).foreach(handleExpression(vars, mg, il))
           il.append(new IDIV())
-        case FunctionCall(name, params, t) =>
-          params.foreach(handleExpression(vars, mg, il))
-          il.append(factory.createInvoke("Program", name, Type.INT, params.map(_ => Type.INT).toArray, Constants.INVOKESTATIC))
-
+        case FunctionCall(name, params, Some(t)) =>
+          params.map(_._2).foreach(handleExpression(vars, mg, il))
+          il.append(factory.createInvoke("Program", name, javaType(t), params.map(t => javaType(t._1.get)).toArray, Constants.INVOKESTATIC))
       }
 
     }
     def handleStmt(vars: mutable.Map[String, Int], mg: MethodGen, il: InstructionList)(s: Stmt): Unit = s match {
       case AssignmentStmt(symbol, t, exp) =>
-        val lg: LocalVariableGen = mg.addLocalVariable(symbol.name, Type.INT, null, null)
+        val lg: LocalVariableGen = mg.addLocalVariable(symbol, javaType(t), null, null)
         val x: Int = lg.getIndex
         handleExpression(vars, mg, il)(exp)
         lg.setStart(il.append(new ISTORE(x)))
-        vars += (symbol.name -> x)
+        vars += (symbol -> x)
       case ExpressionStmt(exp) => handleExpression(vars, mg, il)(exp)
     }
 
@@ -282,11 +310,16 @@ object Main extends SimpleParser {
             il.append(InstructionConstants.RETURN)
           }
         case FunctionDeclaration(fn, params, returnType, body) =>
-          declareMethode(Type.INT, params.map(_._1), params.map(_ => Type.INT), fn) { (il, mg, vars) =>
+          declareMethode(javaType(returnType), params.map(_._1), params.map( t => javaType(t._2)), fn) { (il, mg, vars) =>
             body.foreach(handleStmt(vars, mg, il))
             il.append(InstructionConstants.IRETURN)
           }
       }
+    }
+    def javaType(t: Tpe) = t match {
+      case IntTpe => Type.INT
+      case StringTpe => Type.STRING
+      case VoidTpe => Type.VOID
     }
     p.fd.foreach(handleDeclaration)
     cg.addEmptyConstructor(ACC_PUBLIC)
